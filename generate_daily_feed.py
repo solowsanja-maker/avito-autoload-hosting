@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-SOURCE_CSV = Path("data/source.csv")
+SOURCE_CSV = Path("data/shuffled_source.csv")
 STATE_PATH = Path("data/state.json")
 OUT_FEED = Path("public/feed.xml")
 OUT_REPORT = Path("public/batch_report.json")
@@ -130,7 +130,7 @@ def load_rows() -> list[dict]:
         row["address"] = normalize_text_geo(row.get("address", ""), row["_city"])
         prepared.append(row)
 
-    prepared.sort(key=lambda r: (CITY_PRIORITY.get(r["_city"], 99), r["_bucket"], r["_id"]))
+    # Don't sort - keep the shuffled order from CSV
     return prepared
 
 
