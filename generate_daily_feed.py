@@ -13,6 +13,15 @@ OUT_FEED = Path("public/feed.xml")
 OUT_REPORT = Path("public/batch_report.json")
 PHOTOS_ROOT = Path("photos")
 
+MIX_BUCKETS = [
+    "вертикальные_шторы",
+    "москитные_сетки",
+    "мягкие_окна_беседки",
+    "остекление_балконов",
+    "пластиковые_окна",
+    "рулонные_шторы",
+]
+
 CITY_PRIORITY = {
     "Саратов": 0,
     "Энгельс": 1,
@@ -152,8 +161,11 @@ def load_rows() -> list[dict]:
 
 def load_state(reset: bool) -> dict:
     if reset or not STATE_PATH.exists():
-        return {"next_index": 0, "history": []}
-    return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return {"history": [], "bucket_offsets": {}}
+    state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    state.setdefault("history", [])
+    state.setdefault("bucket_offsets", {})
+    return state
 
 
 def save_state(state: dict) -> None:
@@ -207,50 +219,88 @@ def build_feed(batch: list[dict], photo_urls: dict[str, list[str]]) -> None:
     tree.write(OUT_FEED, encoding="utf-8", xml_declaration=True)
 
 
+def pick_daily_mix(rows: list[dict], state: dict, per_bucket: int) -> tuple[list[dict], dict[str, int], dict[str, int]]:
+    by_bucket = {bucket: [] for bucket in MIX_BUCKETS}
+    for row in rows:
+        bucket = row.get("_bucket", "прочее")
+        if bucket in by_bucket:
+            by_bucket[bucket].append(row)
+
+    offsets = state.get("bucket_offsets", {})
+    selected = []
+    selected_ids = set()
+    mix_stats = {bucket: 0 for bucket in MIX_BUCKETS}
+    new_offsets = {}
+
+    for bucket in MIX_BUCKETS:
+        pool = by_bucket.get(bucket, [])
+        if not pool:
+            new_offsets[bucket] = 0
+            continue
+
+        start = int(offsets.get(bucket, 0)) % len(pool)
+        idx = start
+        taken = 0
+        visited = 0
+
+        while taken < per_bucket and visited < len(pool):
+            row = pool[idx]
+            row_id = row.get("_id", "")
+            if row_id and row_id not in selected_ids:
+                selected.append(row)
+                selected_ids.add(row_id)
+                taken += 1
+                mix_stats[bucket] += 1
+            idx = (idx + 1) % len(pool)
+            visited += 1
+
+        new_offsets[bucket] = (start + taken) % len(pool)
+
+    return selected, mix_stats, new_offsets
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate daily Avito XML batch")
-    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=90)
+    parser.add_argument("--per-bucket", type=int, default=15)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 
     rows = load_rows()
     state = load_state(args.reset)
-    next_index = int(state.get("next_index", 0))
+    daily_mix, mix_stats, new_offsets = pick_daily_mix(rows, state, args.per_bucket)
 
-    if next_index >= len(rows):
-        next_index = len(rows)
-
-    end_index = min(next_index + args.batch_size, len(rows))
-    batch = rows[next_index:end_index]
-    active_rows = rows[:end_index] if end_index > 0 else rows
+    # Keep full feed to prevent accidental archiving in Avito.
+    mix_ids = {r.get("_id", "") for r in daily_mix}
+    tail = [r for r in rows if r.get("_id", "") not in mix_ids]
+    active_rows = daily_mix + tail
 
     photos = build_photo_index(args.base_url.rstrip("/"))
     build_feed(active_rows, photos)
 
     city_stats = {"Саратов": 0, "Энгельс": 0, "Маркс": 0}
-    for r in batch:
+    for r in daily_mix:
         city_stats[r["_city"]] = city_stats.get(r["_city"], 0) + 1
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "batch_from": next_index,
-        "batch_to": end_index,
-        "batch_size": len(batch),
+        "batch_size": len(daily_mix),
+        "per_bucket": args.per_bucket,
+        "mix_stats": mix_stats,
         "active_in_feed": len(active_rows),
         "city_stats": city_stats,
-        "sample_ids": [r.get("_id", "") for r in batch[:10]],
+        "sample_ids": [r.get("_id", "") for r in daily_mix[:10]],
     }
     OUT_REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    state["next_index"] = end_index
+    state["bucket_offsets"] = new_offsets
     state.setdefault("history", []).append(report)
     save_state(state)
 
     print("total_rows", len(rows))
-    print("batch_from", next_index)
-    print("batch_to", end_index)
-    print("batch_size_real", len(batch))
+    print("batch_size_real", len(daily_mix))
+    print("mix_stats", mix_stats)
     print("city_stats", city_stats)
 
 
