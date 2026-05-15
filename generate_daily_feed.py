@@ -54,7 +54,8 @@ def detect_city(address: str) -> str:
 
 
 def detect_bucket(source_file: str) -> str:
-    s = source_file or ""
+    s = (source_file or "").lower()
+    s_norm = s.replace("-", "_").replace(" ", "_")
     for b in (
         "вертикальные_шторы",
         "москитные_сетки",
@@ -63,7 +64,7 @@ def detect_bucket(source_file: str) -> str:
         "пластиковые_окна",
         "рулонные_шторы",
     ):
-        if b in s:
+        if b in s_norm:
             return b
     return "прочее"
 
@@ -98,13 +99,14 @@ def add_category_specific_fields(ad: ET.Element, bucket: str) -> None:
         add_text(ad, "MinSaleQuantity", "1")
         add_text(ad, "PriceFor", "Окно")
         add_text(ad, "Material", "ПВХ")
+        add_text(ad, "Thickness", "0,7 мм")
         add_text(ad, "Width", "1000")
         add_text(ad, "Height", "1000")
         add_text(ad, "Length", "1000")
     elif bucket == "пластиковые_окна":
         add_text(ad, "GoodsSubType", "Окна")
         add_text(ad, "MaterialType", "Пластик")
-        add_text(ad, "ProfileBrand", "Другое")
+        add_text(ad, "ProfileBrand", "Rehau")
         add_text(ad, "BusinessSubType", "Поворотно-откидное")
 
 
@@ -123,8 +125,22 @@ def load_rows() -> list[dict]:
 
     prepared = []
     for row in rows:
+        title = (row.get("title") or "").lower()
         row["_city"] = detect_city(row.get("address", ""))
         row["_bucket"] = detect_bucket(row.get("source_file", ""))
+        if row["_bucket"] == "прочее":
+            if "мягк" in title and "окн" in title:
+                row["_bucket"] = "мягкие_окна_беседки"
+            elif "москит" in title:
+                row["_bucket"] = "москитные_сетки"
+            elif "остеклен" in title and "балкон" in title:
+                row["_bucket"] = "остекление_балконов"
+            elif "пластиков" in title and "окн" in title:
+                row["_bucket"] = "пластиковые_окна"
+            elif "вертикальн" in title:
+                row["_bucket"] = "вертикальные_шторы"
+            elif "рулонн" in title or "жалюз" in title:
+                row["_bucket"] = "рулонные_шторы"
         row["_id"] = row.get("external_id") or row.get("source_id") or ""
         row["description"] = normalize_text_geo(row.get("description", ""), row["_city"])
         row["address"] = normalize_text_geo(row.get("address", ""), row["_city"])
@@ -203,13 +219,14 @@ def main() -> None:
     next_index = int(state.get("next_index", 0))
 
     if next_index >= len(rows):
-        next_index = 0
+        next_index = len(rows)
 
     end_index = min(next_index + args.batch_size, len(rows))
     batch = rows[next_index:end_index]
+    active_rows = rows[:end_index] if end_index > 0 else rows
 
     photos = build_photo_index(args.base_url.rstrip("/"))
-    build_feed(batch, photos)
+    build_feed(active_rows, photos)
 
     city_stats = {"Саратов": 0, "Энгельс": 0, "Маркс": 0}
     for r in batch:
@@ -220,6 +237,7 @@ def main() -> None:
         "batch_from": next_index,
         "batch_to": end_index,
         "batch_size": len(batch),
+        "active_in_feed": len(active_rows),
         "city_stats": city_stats,
         "sample_ids": [r.get("_id", "") for r in batch[:10]],
     }
