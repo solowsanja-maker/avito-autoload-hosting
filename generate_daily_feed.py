@@ -222,7 +222,9 @@ def build_feed(batch: list[dict], photo_urls: dict[str, list[str]]) -> None:
     tree.write(OUT_FEED, encoding="utf-8", xml_declaration=True)
 
 
-def pick_daily_mix(rows: list[dict], state: dict, per_bucket: int) -> tuple[list[dict], dict[str, int], dict[str, int]]:
+def pick_daily_mix(
+    rows: list[dict], state: dict, per_bucket: int, target_total: int
+) -> tuple[list[dict], dict[str, int], dict[str, int]]:
     by_bucket = {bucket: [] for bucket in MIX_BUCKETS}
     for row in rows:
         bucket = row.get("_bucket", "прочее")
@@ -235,6 +237,7 @@ def pick_daily_mix(rows: list[dict], state: dict, per_bucket: int) -> tuple[list
     mix_stats = {bucket: 0 for bucket in MIX_BUCKETS}
     new_offsets = {}
 
+    starts = {}
     for bucket in MIX_BUCKETS:
         pool = by_bucket.get(bucket, [])
         if not pool:
@@ -242,6 +245,7 @@ def pick_daily_mix(rows: list[dict], state: dict, per_bucket: int) -> tuple[list
             continue
 
         start = int(offsets.get(bucket, 0)) % len(pool)
+        starts[bucket] = start
         idx = start
         taken = 0
         visited = 0
@@ -259,12 +263,41 @@ def pick_daily_mix(rows: list[dict], state: dict, per_bucket: int) -> tuple[list
 
         new_offsets[bucket] = (start + taken) % len(pool)
 
+    # Top-up to target total while keeping the minimum per-bucket distribution.
+    bucket_cycle = 0
+    guard = 0
+    while len(selected) < target_total and guard < len(rows) * 2:
+        bucket = MIX_BUCKETS[bucket_cycle % len(MIX_BUCKETS)]
+        bucket_cycle += 1
+        guard += 1
+
+        pool = by_bucket.get(bucket, [])
+        if not pool:
+            continue
+
+        idx = int(new_offsets.get(bucket, starts.get(bucket, 0))) % len(pool)
+        visited = 0
+        while visited < len(pool):
+            row = pool[idx]
+            row_id = row.get("_id", "")
+            idx = (idx + 1) % len(pool)
+            visited += 1
+            if not row_id or row_id in selected_ids:
+                continue
+            selected.append(row)
+            selected_ids.add(row_id)
+            mix_stats[bucket] += 1
+            new_offsets[bucket] = idx
+            break
+        else:
+            new_offsets[bucket] = idx
+
     return selected, mix_stats, new_offsets
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate daily Avito XML batch")
-    parser.add_argument("--batch-size", type=int, default=90)
+    parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--per-bucket", type=int, default=15)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--reset", action="store_true")
@@ -272,7 +305,7 @@ def main() -> None:
 
     rows = load_rows()
     state = load_state(args.reset)
-    daily_mix, mix_stats, new_offsets = pick_daily_mix(rows, state, args.per_bucket)
+    daily_mix, mix_stats, new_offsets = pick_daily_mix(rows, state, args.per_bucket, args.batch_size)
 
     # Keep full feed to prevent accidental archiving in Avito.
     mix_ids = {r.get("_id", "") for r in daily_mix}
