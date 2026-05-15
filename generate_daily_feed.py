@@ -12,6 +12,7 @@ STATE_PATH = Path("data/state.json")
 OUT_FEED = Path("public/feed.xml")
 OUT_REPORT = Path("public/batch_report.json")
 PHOTOS_ROOT = Path("photos")
+OSTEKLENIE_AS_SERVICE = False
 
 MIX_BUCKETS = [
     "вертикальные_шторы",
@@ -78,13 +79,30 @@ def detect_bucket(source_file: str) -> str:
     return "прочее"
 
 
+def detect_bucket_from_id(external_id: str) -> str:
+    s = (external_id or "").lower().replace("-", "_")
+    if "мягкие_окна_беседки" in s:
+        return "мягкие_окна_беседки"
+    if "москитные_сетки" in s:
+        return "москитные_сетки"
+    if "остекление_балконов" in s:
+        return "остекление_балконов"
+    if "пластиковые_окна" in s:
+        return "пластиковые_окна"
+    if "вертикальные_шторы" in s:
+        return "вертикальные_шторы"
+    if "рулонные_шторы" in s:
+        return "рулонные_шторы"
+    return "прочее"
+
+
 def add_text(parent: ET.Element, tag: str, value: str) -> None:
     elem = ET.SubElement(parent, tag)
     elem.text = clean(value)
 
 
 def add_category_specific_fields(ad: ET.Element, bucket: str) -> None:
-    if bucket == "остекление_балконов":
+    if bucket == "остекление_балконов" and OSTEKLENIE_AS_SERVICE:
         for tag, value in SERVICE_DEFAULT.items():
             add_text(ad, tag, value)
         return
@@ -106,12 +124,16 @@ def add_category_specific_fields(ad: ET.Element, bucket: str) -> None:
         add_text(ad, "GoodsSubType", "Мягкие окна")
         add_text(ad, "PackagingType", "Окно на заказ")
         add_text(ad, "MinSaleQuantity", "1")
-        add_text(ad, "PriceFor", "Окно")
+        add_text(ad, "PriceFor", "м²")
         add_text(ad, "Material", "ПВХ")
-        add_text(ad, "Thickness", "0,7 мм")
         add_text(ad, "Width", "1000")
         add_text(ad, "Height", "1000")
         add_text(ad, "Length", "1000")
+    elif bucket == "остекление_балконов":
+        add_text(ad, "GoodsSubType", "Окна")
+        add_text(ad, "MaterialType", "Пластик")
+        add_text(ad, "ProfileBrand", "Rehau")
+        add_text(ad, "BusinessSubType", "Поворотно-откидное")
     elif bucket == "пластиковые_окна":
         add_text(ad, "GoodsSubType", "Окна")
         add_text(ad, "MaterialType", "Пластик")
@@ -135,8 +157,11 @@ def load_rows() -> list[dict]:
     prepared = []
     for row in rows:
         title = (row.get("title") or "").lower()
+        row["_id"] = row.get("external_id") or row.get("source_id") or ""
         row["_city"] = detect_city(row.get("address", ""))
         row["_bucket"] = detect_bucket(row.get("source_file", ""))
+        if row["_bucket"] == "прочее":
+            row["_bucket"] = detect_bucket_from_id(row.get("_id", ""))
         if row["_bucket"] == "прочее":
             if "мягк" in title and "окн" in title:
                 row["_bucket"] = "мягкие_окна_беседки"
@@ -153,7 +178,6 @@ def load_rows() -> list[dict]:
             else:
                 # Keep all rows inside the 6 production buckets to avoid missing category/photo fields.
                 row["_bucket"] = "рулонные_шторы"
-        row["_id"] = row.get("external_id") or row.get("source_id") or ""
         row["description"] = normalize_text_geo(row.get("description", ""), row["_city"])
         row["address"] = normalize_text_geo(row.get("address", ""), row["_city"])
         prepared.append(row)
@@ -210,11 +234,11 @@ def build_feed(batch: list[dict], photo_urls: dict[str, list[str]]) -> None:
         images = ET.SubElement(ad, "Images")
         urls = photo_urls.get(bucket) or photo_urls.get("рулонные_шторы", [])
         if urls:
-            idx = photo_counters[bucket]
+            idx = photo_counters.get(bucket, 0)
             ET.SubElement(images, "Image", {"url": urls[idx % len(urls)]})
             ET.SubElement(images, "Image", {"url": urls[(idx + 1) % len(urls)]})
             ET.SubElement(images, "Image", {"url": urls[(idx + 2) % len(urls)]})
-            photo_counters[bucket] += 1
+            photo_counters[bucket] = idx + 1
 
     OUT_FEED.parent.mkdir(parents=True, exist_ok=True)
     tree = ET.ElementTree(root)
