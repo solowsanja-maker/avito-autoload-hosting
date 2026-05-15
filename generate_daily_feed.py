@@ -150,6 +150,9 @@ def load_rows() -> list[dict]:
                 row["_bucket"] = "вертикальные_шторы"
             elif "рулонн" in title or "жалюз" in title:
                 row["_bucket"] = "рулонные_шторы"
+            else:
+                # Keep all rows inside the 6 production buckets to avoid missing category/photo fields.
+                row["_bucket"] = "рулонные_шторы"
         row["_id"] = row.get("external_id") or row.get("source_id") or ""
         row["description"] = normalize_text_geo(row.get("description", ""), row["_city"])
         row["address"] = normalize_text_geo(row.get("address", ""), row["_city"])
@@ -205,7 +208,7 @@ def build_feed(batch: list[dict], photo_urls: dict[str, list[str]]) -> None:
         add_category_specific_fields(ad, bucket)
 
         images = ET.SubElement(ad, "Images")
-        urls = photo_urls.get(bucket, [])
+        urls = photo_urls.get(bucket) or photo_urls.get("рулонные_шторы", [])
         if urls:
             idx = photo_counters[bucket]
             ET.SubElement(images, "Image", {"url": urls[idx % len(urls)]})
