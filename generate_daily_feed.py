@@ -321,45 +321,69 @@ def pick_daily_mix(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate daily Avito XML batch")
-    parser.add_argument("--batch-size", type=int, default=100)
-    parser.add_argument("--per-bucket", type=int, default=15)
+    parser.add_argument("--batch-size", type=int, default=1500)
+    parser.add_argument("--per-bucket", type=int, default=250)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 
     rows = load_rows()
-    state = load_state(args.reset)
-    daily_mix, mix_stats, new_offsets = pick_daily_mix(rows, state, args.per_bucket, args.batch_size)
 
-    # Keep full feed to prevent accidental archiving in Avito.
-    mix_ids = {r.get("_id", "") for r in daily_mix}
-    tail = [r for r in rows if r.get("_id", "") not in mix_ids]
-    active_rows = daily_mix + tail
+    # Capped balanced feed: ~per_bucket per category, spread across 3 cities.
+    TARGET = 250  # capacity-capped feed, independent of CLI args
+    CITY_ORDER = ["Саратов", "Энгельс", "Маркс"]
+    by_bc = {}
+    for r in rows:
+        b = r.get("_bucket")
+        c = r.get("_city")
+        if b not in MIX_BUCKETS:
+            continue
+        if c not in CITY_ORDER:
+            c = "Саратов"
+        by_bc.setdefault((b, c), []).append(r)
+
+    active_rows = []
+    mix_stats = {b: 0 for b in MIX_BUCKETS}
+    share = TARGET // len(CITY_ORDER)
+    rem = TARGET - share * len(CITY_ORDER)
+    for b in MIX_BUCKETS:
+        chosen = []
+        taken_small = 0
+        for c in ("Энгельс", "Маркс"):
+            pool = by_bc.get((b, c), [])
+            take = min(share, len(pool))
+            chosen += pool[:take]
+            taken_small += take
+        need = TARGET - taken_small
+        sar = by_bc.get((b, "Саратов"), [])
+        chosen += sar[:max(0, need)]
+        active_rows += chosen
+        mix_stats[b] = len(chosen)
 
     photos = build_photo_index(args.base_url.rstrip("/"))
     build_feed(active_rows, photos)
 
-    city_stats = {"Саратов": 0, "Энгельс": 0, "Маркс": 0}
-    for r in daily_mix:
+    city_stats = {}
+    for r in active_rows:
         city_stats[r["_city"]] = city_stats.get(r["_city"], 0) + 1
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "batch_size": len(daily_mix),
+        "batch_size": len(active_rows),
         "per_bucket": args.per_bucket,
         "mix_stats": mix_stats,
         "active_in_feed": len(active_rows),
         "city_stats": city_stats,
-        "sample_ids": [r.get("_id", "") for r in daily_mix[:10]],
+        "sample_ids": [r.get("_id", "") for r in active_rows[:10]],
     }
     OUT_REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    state["bucket_offsets"] = new_offsets
+    state = load_state(args.reset)
     state.setdefault("history", []).append(report)
     save_state(state)
 
     print("total_rows", len(rows))
-    print("batch_size_real", len(daily_mix))
+    print("active_in_feed", len(active_rows))
     print("mix_stats", mix_stats)
     print("city_stats", city_stats)
 
