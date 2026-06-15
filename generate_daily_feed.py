@@ -56,6 +56,14 @@ def clean(text: str) -> str:
 
 def detect_city(address: str) -> str:
     a = (address or "").lower()
+    if "самара" in a:
+        return "Самара"
+    if "тольятти" in a:
+        return "Тольятти"
+    if "волгоград" in a:
+        return "Волгоград"
+    if "пенза" in a:
+        return "Пенза"
     if "энгельс" in a:
         return "Энгельс"
     if "маркс" in a:
