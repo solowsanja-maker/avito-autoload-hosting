@@ -6,33 +6,6 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 import xml.etree.ElementTree as ET
-import hashlib
-
-ID_GENERATION = "-2"
-VARIATION_TAILS = [
-    "Звоните — поможем с замером и расчётом.",
-    "Работаем аккуратно и сдаём в срок.",
-    "Бесплатная консультация по телефону.",
-    "Даём гарантию на материалы и работы.",
-    "Выезд мастера в удобное для вас время.",
-    "Поможем подобрать вариант под ваш бюджет.",
-    "Опыт большой — сделаем как для себя.",
-    "Ответим на все вопросы до начала работ.",
-]
-
-
-def rotate_id(base):
-    return (base or "") + ID_GENERATION
-
-
-def vary_description(text, key):
-    h = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16)
-    tail = VARIATION_TAILS[h % len(VARIATION_TAILS)]
-    base = (text or "").rstrip()
-    if tail in base:
-        return base
-    return base + "\n\n" + tail
-
 
 SOURCE_CSV = Path("data/shuffled_source.csv")
 STATE_PATH = Path("data/state.json")
@@ -184,8 +157,7 @@ def load_rows() -> list[dict]:
     prepared = []
     for row in rows:
         title = (row.get("title") or "").lower()
-        _base = row.get("external_id") or row.get("source_id") or ""
-        row["_id"] = rotate_id(_base)
+        row["_id"] = row.get("external_id") or row.get("source_id") or ""
         row["_city"] = detect_city(row.get("address", ""))
         row["_bucket"] = detect_bucket(row.get("source_file", ""))
         if row["_bucket"] == "прочее":
@@ -206,7 +178,7 @@ def load_rows() -> list[dict]:
             else:
                 # Keep all rows inside the 6 production buckets to avoid missing category/photo fields.
                 row["_bucket"] = "рулонные_шторы"
-        row["description"] = vary_description(normalize_text_geo(row.get("description", ""), row["_city"]), row["_id"])
+        row["description"] = normalize_text_geo(row.get("description", ""), row["_city"])
         row["address"] = normalize_text_geo(row.get("address", ""), row["_city"])
         prepared.append(row)
 
@@ -349,39 +321,45 @@ def pick_daily_mix(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate daily Avito XML batch")
-    parser.add_argument("--batch-size", type=int, default=8817)
-    parser.add_argument("--per-bucket", type=int, default=0)
+    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--per-bucket", type=int, default=15)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 
     rows = load_rows()
-    active_rows = rows
+    state = load_state(args.reset)
+    daily_mix, mix_stats, new_offsets = pick_daily_mix(rows, state, args.per_bucket, args.batch_size)
+
+    # Keep full feed to prevent accidental archiving in Avito.
+    mix_ids = {r.get("_id", "") for r in daily_mix}
+    tail = [r for r in rows if r.get("_id", "") not in mix_ids]
+    active_rows = daily_mix + tail
 
     photos = build_photo_index(args.base_url.rstrip("/"))
     build_feed(active_rows, photos)
 
-    from collections import Counter
-    mix_stats = dict(Counter(r.get("_bucket", "прочее") for r in active_rows))
-    city_stats = dict(Counter(r.get("_city", "?") for r in active_rows))
+    city_stats = {"Саратов": 0, "Энгельс": 0, "Маркс": 0}
+    for r in daily_mix:
+        city_stats[r["_city"]] = city_stats.get(r["_city"], 0) + 1
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "batch_size": len(active_rows),
+        "batch_size": len(daily_mix),
         "per_bucket": args.per_bucket,
         "mix_stats": mix_stats,
         "active_in_feed": len(active_rows),
         "city_stats": city_stats,
-        "sample_ids": [r.get("_id", "") for r in active_rows[:10]],
+        "sample_ids": [r.get("_id", "") for r in daily_mix[:10]],
     }
     OUT_REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    state = load_state(args.reset)
+    state["bucket_offsets"] = new_offsets
     state.setdefault("history", []).append(report)
     save_state(state)
 
     print("total_rows", len(rows))
-    print("active_in_feed", len(active_rows))
+    print("batch_size_real", len(daily_mix))
     print("mix_stats", mix_stats)
     print("city_stats", city_stats)
 
