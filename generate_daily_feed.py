@@ -6,6 +6,33 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 import xml.etree.ElementTree as ET
+import hashlib
+
+ID_GENERATION = "-2"
+VARIATION_TAILS = [
+    "Звоните — поможем с замером и расчётом.",
+    "Работаем аккуратно и сдаём в срок.",
+    "Бесплатная консультация по телефону.",
+    "Даём гарантию на материалы и работы.",
+    "Выезд мастера в удобное для вас время.",
+    "Поможем подобрать вариант под ваш бюджет.",
+    "Опыт большой — сделаем как для себя.",
+    "Ответим на все вопросы до начала работ.",
+]
+
+
+def rotate_id(base):
+    return (base or "") + ID_GENERATION
+
+
+def vary_description(text, key):
+    h = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16)
+    tail = VARIATION_TAILS[h % len(VARIATION_TAILS)]
+    base = (text or "").rstrip()
+    if tail in base:
+        return base
+    return base + "\n\n" + tail
+
 
 SOURCE_CSV = Path("data/shuffled_source.csv")
 STATE_PATH = Path("data/state.json")
@@ -157,7 +184,8 @@ def load_rows() -> list[dict]:
     prepared = []
     for row in rows:
         title = (row.get("title") or "").lower()
-        row["_id"] = row.get("external_id") or row.get("source_id") or ""
+        _base = row.get("external_id") or row.get("source_id") or ""
+        row["_id"] = rotate_id(_base)
         row["_city"] = detect_city(row.get("address", ""))
         row["_bucket"] = detect_bucket(row.get("source_file", ""))
         if row["_bucket"] == "прочее":
@@ -178,7 +206,7 @@ def load_rows() -> list[dict]:
             else:
                 # Keep all rows inside the 6 production buckets to avoid missing category/photo fields.
                 row["_bucket"] = "рулонные_шторы"
-        row["description"] = normalize_text_geo(row.get("description", ""), row["_city"])
+        row["description"] = vary_description(normalize_text_geo(row.get("description", ""), row["_city"]), row["_id"])
         row["address"] = normalize_text_geo(row.get("address", ""), row["_city"])
         prepared.append(row)
 
@@ -321,51 +349,21 @@ def pick_daily_mix(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate daily Avito XML batch")
-    parser.add_argument("--batch-size", type=int, default=1500)
-    parser.add_argument("--per-bucket", type=int, default=250)
+    parser.add_argument("--batch-size", type=int, default=8817)
+    parser.add_argument("--per-bucket", type=int, default=0)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 
     rows = load_rows()
-
-    # Capped balanced feed: ~per_bucket per category, spread across 3 cities.
-    TARGET = 250  # capacity-capped feed, independent of CLI args
-    CITY_ORDER = ["Саратов", "Энгельс", "Маркс"]
-    by_bc = {}
-    for r in rows:
-        b = r.get("_bucket")
-        c = r.get("_city")
-        if b not in MIX_BUCKETS:
-            continue
-        if c not in CITY_ORDER:
-            c = "Саратов"
-        by_bc.setdefault((b, c), []).append(r)
-
-    active_rows = []
-    mix_stats = {b: 0 for b in MIX_BUCKETS}
-    share = TARGET // len(CITY_ORDER)
-    rem = TARGET - share * len(CITY_ORDER)
-    for b in MIX_BUCKETS:
-        chosen = []
-        taken_small = 0
-        for c in ("Энгельс", "Маркс"):
-            pool = by_bc.get((b, c), [])
-            take = min(share, len(pool))
-            chosen += pool[:take]
-            taken_small += take
-        need = TARGET - taken_small
-        sar = by_bc.get((b, "Саратов"), [])
-        chosen += sar[:max(0, need)]
-        active_rows += chosen
-        mix_stats[b] = len(chosen)
+    active_rows = rows
 
     photos = build_photo_index(args.base_url.rstrip("/"))
     build_feed(active_rows, photos)
 
-    city_stats = {}
-    for r in active_rows:
-        city_stats[r["_city"]] = city_stats.get(r["_city"], 0) + 1
+    from collections import Counter
+    mix_stats = dict(Counter(r.get("_bucket", "прочее") for r in active_rows))
+    city_stats = dict(Counter(r.get("_city", "?") for r in active_rows))
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
